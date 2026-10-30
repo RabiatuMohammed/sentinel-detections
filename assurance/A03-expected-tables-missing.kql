@@ -1,0 +1,21 @@
+// Detection Assurance A03 - Expected tables with no data (hunting query)
+// A01 only lists tables that sent data. A connector that was never working sends nothing,
+// so its table never appears there. This query checks the tables your detections depend on.
+// Edit Expected to match the data sources your analytics rules use.
+let Expected = datatable(TableName: string, UsedBy: string) [
+    "SigninLogs",          "Rules 01, 04, 10",
+    "AuditLogs",           "Rules 02, 03",
+    "OfficeActivity",      "Rules 05, 06, 09",
+    "AzureActivity",       "Rule 09",
+    "DeviceProcessEvents", "Rule 07",
+    "DeviceLogonEvents",   "Rule 08"
+];
+let Seen = union withsource = TableName isfuzzy = true
+        SigninLogs, AuditLogs, OfficeActivity, AzureActivity, DeviceProcessEvents, DeviceLogonEvents
+    | where TimeGenerated > ago(30d)
+    | summarize Events = count(), LastSeen = max(TimeGenerated) by TableName;
+Expected
+| join kind = leftouter Seen on TableName
+| extend Status = iff(isnull(LastSeen), "No data in 30 days - dependent rules are blind", "Receiving data")
+| project TableName, Status, UsedBy, Events, LastSeen
+| sort by Status asc

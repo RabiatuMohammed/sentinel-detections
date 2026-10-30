@@ -1,0 +1,11 @@
+// DET-LEAVER-01 (v1) - first version, kept to show the tuning
+// Matches every successful sign-in by an account on the Leavers watchlist.
+// Problem: one row per sign-in (103 rows for one test leaver), and it ignores the leave date.
+// Replaced by v2.
+let Leavers = _GetWatchlist('Leavers')
+    | project UPN = tolower(tostring(SearchKey));
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "0"
+| where tolower(UserPrincipalName) in (Leavers)
+| project TimeGenerated, UserPrincipalName, AppDisplayName, IPAddress, Location

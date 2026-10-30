@@ -1,0 +1,29 @@
+// DET-LEAVER-01 (v2) - Leaver account sign-in
+// Alerts once per leaver whose account signs in successfully after their leave date.
+// Data: SigninLogs + "Leavers" watchlist (columns: UserPrincipalName, LeaveDate), SearchKey = UserPrincipalName.
+// MITRE ATT&CK: T1078 Valid Accounts. Suggested severity: High. Schedule: every 1 hour, 7-day lookback.
+//
+// Notes:
+// - Reads the Watchlist table directly instead of _GetWatchlist(), so the LeaveDate column is
+//   always resolvable when the query is validated.
+// - coalesce() and trim() make it tolerant of a CSV saved with spaces after the commas
+//   (which turns the column name into " LeaveDate").
+let Leavers = Watchlist
+    | where TimeGenerated > ago(90d)
+    | where WatchlistAlias == "Leavers"
+    | summarize arg_max(TimeGenerated, *) by _DTItemId
+    | where _DTItemStatus != "Delete"
+    | extend RawDate = coalesce(tostring(WatchlistItem["LeaveDate"]), tostring(WatchlistItem[" LeaveDate"]))
+    | project UPN = tolower(trim(@"\s", tostring(SearchKey))), LeaveDate = todatetime(trim(@"\s", RawDate));
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where ResultType == "0"
+| extend UPN = tolower(UserPrincipalName)
+| join kind=inner Leavers on UPN
+| where TimeGenerated > LeaveDate
+| summarize SignIns = count(),
+            FirstSeen = min(TimeGenerated),
+            LastSeen = max(TimeGenerated),
+            Apps = make_set(AppDisplayName),
+            IPs = make_set(IPAddress)
+            by UPN, LeaveDate

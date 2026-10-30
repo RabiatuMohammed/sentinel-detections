@@ -1,0 +1,20 @@
+// Detection Assurance A01 - Data source health overview (hunting query / workbook tile)
+// Shows every table sending billable data: when it last arrived, volume, and how many of the
+// last 30 days it was active. Cheap to run: uses the Usage table, not the raw logs.
+// Run in Sentinel > Logs over the last 30 days.
+Usage
+| where TimeGenerated > ago(30d)
+| summarize LastSeen = max(TimeGenerated),
+            GB_30d = round(sum(Quantity) / 1024.0, 2),
+            ActiveDays = dcount(bin(TimeGenerated, 1d)),
+            Billable = max(toint(IsBillable)),
+            Solutions = make_set(Solution)
+            by DataType
+// One row per table: grouping by Solution as well splits a table into stale duplicate rows.
+| extend HoursSinceLastData = datetime_diff('hour', now(), LastSeen)
+| extend Status = case(
+    HoursSinceLastData >= 24, "Silent",
+    HoursSinceLastData >= 6,  "Delayed",
+    "Healthy")
+| project Status, DataType, Solutions, LastSeen, HoursSinceLastData, ActiveDays, GB_30d, Billable
+| sort by HoursSinceLastData desc, GB_30d desc

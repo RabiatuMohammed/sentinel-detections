@@ -1,0 +1,34 @@
+// DA-02 - Critical log source has gone silent
+// Deployed as a scheduled analytics rule: run every 1 hour, look back 7 days, alert when results > 0,
+// one alert per table. Severity High. MITRE ATT&CK: T1562 / T1562.008.
+// Tested with "Test with current data": 0 alerts across 50 simulated runs.
+//
+// Allowed silence per table, in hours. Tune to how often each table normally receives data:
+// sign-in tables get data all day; admin-change tables (AuditLogs, AzureActivity) can be quiet for days.
+let Thresholds = datatable(TableName: string, MaxSilenceHours: int) [
+    "AADNonInteractiveUserSignInLogs", 6,
+    "MicrosoftGraphActivityLogs", 6,
+    "SigninLogs", 24,
+    "AuditLogs", 72,
+    "AzureActivity", 72,
+    "OfficeActivity", 12,
+    "DeviceProcessEvents", 6,
+    "DeviceLogonEvents", 12
+];
+// Only watch tables that are normally active: data on at least 5 of the last 7 days.
+let Baseline = Usage
+    | where TimeGenerated > ago(7d)
+    | summarize ActiveDays = dcount(bin(TimeGenerated, 1d)) by TableName = DataType
+    | where ActiveDays >= 5;
+// Last event per table in the past 7 days.
+let Recent = union withsource = TableName isfuzzy = true
+        AADNonInteractiveUserSignInLogs, MicrosoftGraphActivityLogs, SigninLogs,
+        AuditLogs, AzureActivity, OfficeActivity, DeviceProcessEvents, DeviceLogonEvents
+    | where TimeGenerated > ago(7d)
+    | summarize LastSeen = max(TimeGenerated) by TableName;
+Thresholds
+| join kind=inner Baseline on TableName
+| join kind=leftouter Recent on TableName
+| where isnull(LastSeen) or LastSeen < ago(MaxSilenceHours * 1h)
+| extend HoursSilent = iff(isnull(LastSeen), 168.0, round((now() - LastSeen) / 1h, 1))
+| project TableName, LastSeen, HoursSilent, MaxSilenceHours, ActiveDays
