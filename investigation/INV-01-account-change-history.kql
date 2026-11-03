@@ -1,0 +1,16 @@
+// INV-01 - Account change history
+// Every change made to one account in Entra ID, and who or what made it.
+// Change TargetUser on line 1.
+//
+// Most rows are Microsoft's own services reacting to a change (MFA registration,
+// password reset service, Substrate sync). The rows that matter are the ones where
+// a person made a decision, such as "Disable account" or "Enable account".
+// coalesce() fills ChangedBy with the app name when no user made the change.
+let TargetUser = "user@contoso.com";
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where tostring(TargetResources[0].userPrincipalName) =~ TargetUser
+| extend ChangedBy = coalesce(tostring(InitiatedBy.user.userPrincipalName),
+                              tostring(InitiatedBy.app.displayName))
+| project TimeGenerated, OperationName, Result, ChangedBy
+| order by TimeGenerated asc

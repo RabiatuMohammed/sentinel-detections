@@ -1,0 +1,28 @@
+// DET-LEAVER-02 - Leaver account re-enabled
+// Alerts when an account on the Leavers watchlist is re-enabled after its leave date,
+// and shows who re-enabled it. Fires on the re-enable itself, before the leaver can sign in.
+// Data: AuditLogs + "Leavers" watchlist (columns: UserPrincipalName, LeaveDate), SearchKey = UserPrincipalName.
+// MITRE ATT&CK: T1098 Account Manipulation, T1078 Valid Accounts. Suggested severity: High.
+//
+// Tested 1 Nov 2026: test account disabled 13:11 UTC, sign-in refused 13:15 (50057),
+// re-enabled 13:29, signed in 13:31. This query returned one row at 13:29:17,
+// two minutes before the sign-in. DET-LEAVER-01 could only fire after it.
+//
+// Before going live: remove test entries from the watchlist, and add exceptions for
+// rehires or accounts IT is re-enabling under a ticket.
+let Leavers = Watchlist
+    | where TimeGenerated > ago(90d)
+    | where WatchlistAlias == "Leavers"
+    | summarize arg_max(TimeGenerated, *) by _DTItemId
+    | where _DTItemStatus != "Delete"
+    | extend RawDate = coalesce(tostring(WatchlistItem["LeaveDate"]), tostring(WatchlistItem[" LeaveDate"]))
+    | project UPN = tolower(trim(@"\s", tostring(SearchKey))), LeaveDate = todatetime(trim(@"\s", RawDate));
+AuditLogs
+| where TimeGenerated > ago(1d)
+| where OperationName == "Enable account"
+| extend UPN = tolower(tostring(TargetResources[0].userPrincipalName)),
+         EnabledBy = coalesce(tostring(InitiatedBy.user.userPrincipalName),
+                              tostring(InitiatedBy.app.displayName))
+| join kind=inner Leavers on UPN
+| where TimeGenerated > LeaveDate
+| project TimeGenerated, UPN, LeaveDate, EnabledBy

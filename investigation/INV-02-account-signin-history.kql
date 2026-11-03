@@ -1,0 +1,15 @@
+// INV-02 - Account sign-in history
+// Every sign-in attempt for one account, with result code, app, IP, browser and OS.
+// Change TargetUser on line 1.
+//
+// Useful result codes: 0 = success, 50057 = account disabled, 50053 = account locked,
+// 50055 = password expired, 50126 = wrong password. Go by the code, not by what the
+// user says the screen told them: a disabled account shows users a "locked" message.
+let TargetUser = "user@contoso.com";
+SigninLogs
+| where TimeGenerated > ago(7d)
+| where UserPrincipalName =~ TargetUser
+| project TimeGenerated, ResultType, ResultDescription, AppDisplayName, IPAddress,
+          Browser = tostring(DeviceDetail.browser),
+          OS = tostring(DeviceDetail.operatingSystem)
+| order by TimeGenerated asc

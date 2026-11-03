@@ -10,6 +10,9 @@ Two questions drive this repo: does a detection catch what it should without bur
 |---|---|
 | `detections/DET-LEAVER-01-leaver-signin-v2.kql` | One alert per person who has left but whose account still signs in after their leave date |
 | `detections/DET-LEAVER-01-leaver-signin-v1.kql` | The first version, kept to show what changed |
+| `detections/DET-LEAVER-02-leaver-account-reenabled.kql` | Alerts when a leaver's account is switched back on, and shows who did it |
+| `investigation/INV-01-account-change-history.kql` | Every change made to one account, and who or what made it |
+| `investigation/INV-02-account-signin-history.kql` | Every sign-in attempt for one account, with result code, IP, browser and OS |
 | `assurance/A01-data-source-health-overview.kql` | Every table: last data, 30-day volume, active days, Healthy / Delayed / Silent |
 | `assurance/A03-expected-tables-missing.kql` | The tables my rules depend on, flagging any with no data in 30 days |
 | `assurance/DA-02-critical-log-source-silent.kql` | Hourly rule that raises an incident when a normally active source goes quiet |
@@ -33,6 +36,23 @@ Two questions drive this repo: does a detection catch what it should without bur
 | v2 | 1 row: 103 sign-ins, first and last seen, 4 apps, 2 IPs | Added the leave-date check and grouped per person |
 
 **A bug worth recording.** v2 first failed with "Failed to resolve scalar expression named 'LeaveDate'". Inspecting the raw watchlist showed the CSV had been saved with a space after each comma, so the column was really `" LeaveDate"`. The final query reads the `Watchlist` table directly and tolerates both forms with `coalesce()` and `trim()`.
+
+## Catching the re-enable, not just the sign-in
+
+DET-LEAVER-01 fires when a leaver signs in, which is after the harm. So I tested a worse version of the problem on 1 November 2026, using a test account:
+
+| Time (UTC) | What happened | Log |
+|---|---|---|
+| 13:11 | Account disabled, her leave date | AuditLogs: Disable account |
+| 13:15 | She tries to sign in and is refused | SigninLogs: 50057, account disabled |
+| 13:29 | Account re-enabled | AuditLogs: Enable account |
+| 13:31 | She signs in again | SigninLogs: 0, success |
+
+The re-enable is the moment that matters. Disabling her was the right ending, so undoing it needs a reason. **DET-LEAVER-02** fires on the "Enable account" event for anyone on the leavers list, two minutes before the sign-in, and shows who re-enabled the account. Against the test it returned one row, at 13:29:17.
+
+Two things I learned on the way:
+- The sign-in screen told the user her account was **locked**, but the log said **disabled** (50057). Locked would have been 50053. Go by the code.
+- Most of the 22 audit events for the account were Microsoft's own services tidying up after each change. Only two rows were a person making a decision. INV-01 shows the app name for the rest, so they're easy to set aside.
 
 ## Data source health (Detection Assurance)
 
