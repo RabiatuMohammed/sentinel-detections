@@ -19,6 +19,23 @@ Two questions drive this repo: does a detection catch what it should without bur
 | `assurance/DA-02-critical-log-source-silent.kql` | Hourly rule that raises an incident when a normally active source goes quiet |
 | `watchlists/Leavers-sample.csv` | Sample leavers list (fake accounts) |
 
+
+## MITRE ATT&CK Mapping
+
+| ID | Detection Rule | Tactic | Technique | Sub-technique | Data Source | Status |
+|:---|:---|:---|:---|:---|:---|:---|
+| **DET-01** | [Potential Brute Force Attack](detections/01-brute-force-detection.md) | Credential Access (TA0006) | Brute Force (T1110) | Password Guessing (T1110.001) | SigninLogs | Validated |
+| **DET-02** | [Leaver Account Sign-In](detections/DET-LEAVER-01-leaver-signin-v2.kql) | Persistence (TA0003) | Account Manipulation (T1098) | - | SigninLogs, Watchlist | Validated |
+| **DET-03** | [Leaver Account Re-enabled](detections/DET-LEAVER-02-leaver-account-reenabled.kql) | Persistence (TA0003) | Account Manipulation (T1098) | - | AuditLogs, Watchlist | Validated |
+| **ASSUR-01** | [Data Source Health Overview](assurance/A01-data-source-health-overview.kql) | Defense Evasion (TA0005) | Indicator Removal (T1070) | - | Usage | Validated |
+| **ASSUR-02** | [Critical Log Source Silent](assurance/DA-02-critical-log-source-silent.kql) | Defense Evasion (TA0005) | Indicator Removal (T1070) | Disable or Modify Cloud Logs (T1562.008) | Multiple tables | Validated |
+
+### Legend
+- **DET** = Detection Rule
+- **ASSUR** = Detection Assurance (Health Check)
+- **INV** = Investigation Query
+- Validated = Tested and validated in production environment
+
 ## Leaver account detection
 
 **The problem.** When someone leaves and their account isn't disabled, their sign-ins look completely normal: same IP range, same apps. Location-based rules won't catch it. The only signal is that the person is no longer meant to be there, and that information lives with HR, not in the logs.
