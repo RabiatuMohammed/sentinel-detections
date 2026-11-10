@@ -8,6 +8,7 @@ Two questions drive this repo: does a detection catch what it should without bur
 
 | File | What it does |
 |---|---|
+| `detections/01-brute-force-detection.md` | Detects multiple failed sign-ins (MITRE T1110.001) |
 | `detections/DET-LEAVER-01-leaver-signin-v2.kql` | One alert per person who has left but whose account still signs in after their leave date |
 | `detections/DET-LEAVER-01-leaver-signin-v1.kql` | The first version, kept to show what changed |
 | `detections/DET-LEAVER-02-leaver-account-reenabled.kql` | Alerts when a leaver's account is switched back on, and shows who did it |
