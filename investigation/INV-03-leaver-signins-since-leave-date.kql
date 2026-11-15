@@ -1,0 +1,39 @@
+// INV-03 - Leaver sign-ins since leave date (hunting)
+// Every successful sign-in, interactive and non-interactive, by each account on the
+// Leavers watchlist since that person's own leave date, across the full retention window.
+// Run manually when DET-LEAVER-01 or DET-LEAVER-02 fires, to find when access really resumed.
+// Data: SigninLogs + AADNonInteractiveUserSignInLogs + "Leavers" watchlist
+//       (columns: UserPrincipalName, LeaveDate), SearchKey = UserPrincipalName.
+// MITRE ATT&CK: T1078.004 Valid Accounts: Cloud Accounts.
+//
+// Notes:
+// - 90-day outer window covers typical SigninLogs retention; the LeaveDate filter then
+//   keeps only sign-ins after each person left.
+// - Non-interactive sign-ins are included: a device that is still signed in refreshes
+//   tokens with no password prompt, and those rows exist only in AADNonInteractiveUserSignInLogs.
+// - FirstSeenAfterLeave is the earliest sign-in still in retained logs; if it sits at the
+//   edge of retention, the true first return may be earlier.
+// - Tested 14 Nov 2026: test leaver returned 38 sign-ins from both tables, first back
+//   0 days after the leave date.
+// - Hunting approach suggested by UriShay (CyberSnap) on Microsoft Tech Community.
+let Leavers = Watchlist
+| where TimeGenerated > ago(90d)
+| where WatchlistAlias == "Leavers"
+| summarize arg_max(TimeGenerated, *) by _DTItemId
+| where _DTItemStatus != "Delete"
+| extend RawDate = coalesce(tostring(WatchlistItem["LeaveDate"]), tostring(WatchlistItem[" LeaveDate"]))
+| project UPN = tolower(trim(@"\s", tostring(SearchKey))), LeaveDate = todatetime(trim(@"\s", RawDate));
+union SigninLogs, AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(90d)
+| where ResultType == "0"
+| extend UPN = tolower(UserPrincipalName)
+| join kind=inner Leavers on UPN
+| where TimeGenerated > LeaveDate
+| summarize SignIns = count(),
+            FirstSeenAfterLeave = min(TimeGenerated),
+            LastSeen = max(TimeGenerated),
+            Apps = make_set(AppDisplayName),
+            IPs = make_set(IPAddress),
+            SignInSources = make_set(Type)        
+            by UPN, LeaveDate
+| extend DaysToFirstReturn = datetime_diff('day', FirstSeenAfterLeave, LeaveDate)
