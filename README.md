@@ -14,6 +14,7 @@ Two questions drive this repo: does a detection catch what it should without bur
 | `detections/DET-LEAVER-02-leaver-account-reenabled.kql` | Alerts when a leaver's account is switched back on, and shows who did it |
 | `investigation/INV-01-account-change-history.kql` | Every change made to one account, and who or what made it |
 | `investigation/INV-02-account-signin-history.kql` | Every sign-in attempt for one account, with result code, IP, browser and OS |
+| `investigation/INV-03-leaver-signins-since-leave-date.kql` | Hunting: every sign-in (interactive and non-interactive) by each leaver since their own leave date, with days to first return |
 | `assurance/A01-data-source-health-overview.kql` | Every table: last data, 30-day volume, active days, Healthy / Delayed / Silent |
 | `assurance/A03-expected-tables-missing.kql` | The tables my rules depend on, flagging any with no data in 30 days |
 | `assurance/DA-02-critical-log-source-silent.kql` | Hourly rule that raises an incident when a normally active source goes quiet |
@@ -25,8 +26,9 @@ Two questions drive this repo: does a detection catch what it should without bur
 | ID | Detection Rule | Tactic | Technique | Sub-technique | Data Source | Status |
 |:---|:---|:---|:---|:---|:---|:---|
 | **DET-01** | [Potential Brute Force Attack](detections/01-brute-force-detection.md) | Credential Access (TA0006) | Brute Force (T1110) | Password Guessing (T1110.001) | SigninLogs | Validated |
-| **DET-02** | [Leaver Account Sign-In](detections/DET-LEAVER-01-leaver-signin-v2.kql) | Persistence (TA0003) | Account Manipulation (T1098) | - | SigninLogs, Watchlist | Validated |
+| **DET-02** | [Leaver Account Sign-In](detections/DET-LEAVER-01-leaver-signin-v2.kql) | Initial Access (TA0001), Persistence (TA0003) | Valid Accounts (T1078) | Cloud Accounts (T1078.004) | SigninLogs, Watchlist | Validated |
 | **DET-03** | [Leaver Account Re-enabled](detections/DET-LEAVER-02-leaver-account-reenabled.kql) | Persistence (TA0003) | Account Manipulation (T1098) | - | AuditLogs, Watchlist | Validated |
+| **INV-03** | [Leaver Sign-ins Since Leave Date](investigation/INV-03-leaver-signins-since-leave-date.kql) | Initial Access (TA0001), Persistence (TA0003) | Valid Accounts (T1078) | Cloud Accounts (T1078.004) | SigninLogs, AADNonInteractiveUserSignInLogs, Watchlist | Validated |
 | **ASSUR-01** | [Data Source Health Overview](assurance/A01-data-source-health-overview.kql) | Defense Evasion (TA0005) | Indicator Removal (T1070) | - | Usage | Validated |
 | **ASSUR-02** | [Critical Log Source Silent](assurance/DA-02-critical-log-source-silent.kql) | Defense Evasion (TA0005) | Indicator Removal (T1070) | Disable or Modify Cloud Logs (T1562.008) | Multiple tables | Validated |
 
@@ -34,7 +36,7 @@ Two questions drive this repo: does a detection catch what it should without bur
 - **DET** = Detection Rule
 - **ASSUR** = Detection Assurance (Health Check)
 - **INV** = Investigation Query
-- Validated = Tested and validated in production environment
+- Validated = Tested in a live Microsoft 365 and Microsoft Sentinel lab environment
 
 ## Leaver account detection
 
@@ -71,6 +73,16 @@ The re-enable is the moment that matters. Disabling her was the right ending, so
 Two things I learned on the way:
 - The sign-in screen told the user her account was **locked**, but the log said **disabled** (50057). Locked would have been 50053. Go by the code.
 - Most of the 22 audit events for the account were Microsoft's own services tidying up after each change. Only two rows were a person making a decision. INV-01 shows the app name for the rest, so they're easy to set aside.
+
+## Hunting from the leave date
+
+The scheduled rules look back 7 days, so a leaver who got back in three weeks ago never appears. After I published the leaver write-up, UriShay (CyberSnap) suggested a hunting query anchored on each person's leave date instead. **INV-03** does this:
+
+- Looks back across the full 90-day window, then keeps only sign-ins after each person's own leave date.
+- Includes `AADNonInteractiveUserSignInLogs`. A device that is still signed in refreshes tokens with no password prompt, and those sign-ins never appear in `SigninLogs`.
+- Adds `SignInSources` (which tables the access came from) and `DaysToFirstReturn` (where to start the investigation timeline).
+
+In testing, the test leaver showed 38 sign-ins from both tables, back the same day they left. `FirstSeenAfterLeave` is the earliest sign-in still in retention, so if it sits at the retention edge, the true first return may be earlier.
 
 ## Data source health (Detection Assurance)
 
