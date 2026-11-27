@@ -1,0 +1,3 @@
+SiteUrl,DataOwner,Notes
+https://contoso.sharepoint.com/sites/Oncology/,records.owner@contoso.com,Sample: site holding PHI with a neutral name
+https://contoso-my.sharepoint.com/personal/clinician_contoso_com/,records.owner@contoso.com,Sample: personal OneDrive known to hold PHI exports

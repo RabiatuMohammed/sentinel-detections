@@ -1,0 +1,17 @@
+let DetectionWindow = 1h;
+let MaxArrivalDelay = 1d;
+let Rx = @"(?i)(^|[^a-z])(patients?|phi|ehr|emr|clinical|medical[ _-]?records?)([^a-z]|$)";
+let SensitiveSites = toscalar(TestWatchlist | summarize make_set(tolower(trim_end(@"/", tostring(SearchKey)))));
+let S1 = OfficeActivity | where TimeGenerated > ago(MaxArrivalDelay) | where coalesce(ingestion_time(), TimeGenerated) > ago(DetectionWindow);
+let S2 = S1 | where OfficeWorkload in ("SharePoint", "OneDrive") | where Operation in ("FileDownloaded", "FileSyncDownloadedFull");
+let S3 = S2 | where UserId has "@";
+let S4 = S3 | where tolower(trim_end(@"/", Site_Url)) in (SensitiveSites) or strcat(Site_Url, SourceRelativeUrl) matches regex Rx;
+print
+    Step0_AllRows     = toscalar(OfficeActivity | count),
+    Step1_InWindow    = toscalar(S1 | count),
+    Step2_Downloads   = toscalar(S2 | count),
+    Step3_UserHasAt   = toscalar(S3 | count),
+    Step4_PHIScope    = toscalar(S4 | count),
+    WatchlistSites    = SensitiveSites,
+    FixtureTimeRange  = toscalar(OfficeActivity | summarize strcat(tostring(min(TimeGenerated)), " to ", tostring(max(TimeGenerated)))),
+    Now               = now()

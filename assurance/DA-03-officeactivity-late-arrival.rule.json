@@ -1,0 +1,56 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "workspace": {
+            "type": "String"
+        }
+    },
+    "resources": [
+        {
+            "id": "[concat(resourceId('Microsoft.OperationalInsights/workspaces/providers', parameters('workspace'), 'Microsoft.SecurityInsights'),'/alertRules/6158519a-1d62-4245-824a-6d1d35796ac9')]",
+            "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/6158519a-1d62-4245-824a-6d1d35796ac9')]",
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "kind": "Scheduled",
+            "apiVersion": "2023-12-01-preview",
+            "properties": {
+                "displayName": "HEALTH - OfficeActivity records arriving more than 1 day late",
+                "description": "Alerts when OfficeActivity records arrive more than 1 day after the event. The PHI bulk download rule ignores records later than MaxArrivalDelay (1d); if this fires, raise MaxArrivalDelay and BaselineGap together.",
+                "severity": "Low",
+                "enabled": true,
+                "query": "OfficeActivity\r\n| where TimeGenerated > ago(14d)\r\n| where ingestion_time() > ago(1h)\r\n| extend Lag = ingestion_time() - TimeGenerated\r\n| where Lag > 1d\r\n| summarize LateRecords = count(), WorstLag = max(Lag)\r\n| where LateRecords > 0",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P14D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT5H",
+                "suppressionEnabled": false,
+                "startTimeUtc": null,
+                "tactics": [],
+                "techniques": [],
+                "subTechniques": [],
+                "alertRuleTemplateName": null,
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": false,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "PT5H",
+                        "matchingMethod": "AllEntities",
+                        "groupByEntities": [],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                },
+                "eventGroupingSettings": {
+                    "aggregationKind": "AlertPerResult"
+                },
+                "alertDetailsOverride": null,
+                "customDetails": null,
+                "entityMappings": null,
+                "sentinelEntitiesMappings": null,
+                "templateVersion": null
+            }
+        }
+    ]
+}

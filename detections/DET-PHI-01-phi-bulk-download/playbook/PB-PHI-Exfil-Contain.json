@@ -1,0 +1,232 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "PlaybookName": {
+            "defaultValue": "PB-PHI-Exfil-Contain",
+            "type": "String"
+        }
+    },
+    "variables": {
+        "SentinelConnectionName": "[concat('azuresentinel-', parameters('PlaybookName'))]"
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "name": "[variables('SentinelConnectionName')]",
+            "location": "[resourceGroup().location]",
+            "kind": "V1",
+            "properties": {
+                "displayName": "[variables('SentinelConnectionName')]",
+                "customParameterValues": {},
+                "parameterValueType": "Alternative",
+                "api": {
+                    "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuresentinel')]"
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Logic/workflows",
+            "apiVersion": "2019-05-01",
+            "name": "[parameters('PlaybookName')]",
+            "location": "[resourceGroup().location]",
+            "identity": {
+                "type": "SystemAssigned"
+            },
+            "properties": {
+                "state": "Enabled",
+                "definition": {
+                    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "$connections": {
+                            "defaultValue": {},
+                            "type": "Object"
+                        }
+                    },
+                    "triggers": {
+                        "Microsoft_Sentinel_incident": {
+                            "type": "ApiConnectionWebhook",
+                            "inputs": {
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                                    }
+                                },
+                                "body": {
+                                    "callback_url": "@{listCallbackUrl()}"
+                                },
+                                "path": "/incident-creation"
+                            }
+                        }
+                    },
+                    "actions": {
+                        "Entities_-_Get_Accounts": {
+                            "runAfter": {},
+                            "type": "ApiConnection",
+                            "inputs": {
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                                    }
+                                },
+                                "method": "post",
+                                "body": "@triggerBody()?['object']?['properties']?['relatedEntities']",
+                                "path": "/entities/account"
+                            }
+                        },
+                        "Condition": {
+                            "actions": {
+                                "For_each": {
+                                    "foreach": "@body('Entities_-_Get_Accounts')?['Accounts']",
+                                    "actions": {
+                                        "Revoke_sign-in_sessions": {
+                                            "type": "Http",
+                                            "inputs": {
+                                                "uri": "https://graph.microsoft.com/v1.0/users/@{concat(items('For_each')?['Name'], '@', items('For_each')?['UPNSuffix'])}/revokeSignInSessions",
+                                                "method": "POST",
+                                                "headers": {
+                                                    "Content-Type": "application/json"
+                                                },
+                                                "authentication": {
+                                                    "type": "ManagedServiceIdentity",
+                                                    "audience": "https://graph.microsoft.com"
+                                                }
+                                            },
+                                            "runtimeConfiguration": {
+                                                "contentTransfer": {
+                                                    "transferMode": "Chunked"
+                                                }
+                                            }
+                                        },
+                                        "Comment_-_revoke_failed": {
+                                            "runAfter": {
+                                                "Revoke_sign-in_sessions": [
+                                                    "Failed",
+                                                    "TimedOut"
+                                                ]
+                                            },
+                                            "type": "ApiConnection",
+                                            "inputs": {
+                                                "host": {
+                                                    "connection": {
+                                                        "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                                                    }
+                                                },
+                                                "method": "post",
+                                                "body": {
+                                                    "incidentArmId": "@triggerBody()?['object']?['id']",
+                                                    "message": "[concat('<p class=\"editor-paragraph\">Automated containment FAILED (', parameters('PlaybookName'), '): sign-in sessions were NOT revoked for @{concat(item()?[''Name''], ''@'', item()?[''UPNSuffix''])}. Graph status: @{outputs(''Revoke_sign-in_sessions'')?[''statusCode'']}. Revoke the sessions manually in Entra ID and check the playbook run history.</p>')]"
+                                                },
+                                                "path": "/Incidents/Comment"
+                                            }
+                                        },
+                                        "Comment_-_sessions_revoked": {
+                                            "runAfter": {
+                                                "Revoke_sign-in_sessions": [
+                                                    "Succeeded"
+                                                ]
+                                            },
+                                            "type": "ApiConnection",
+                                            "inputs": {
+                                                "host": {
+                                                    "connection": {
+                                                        "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                                                    }
+                                                },
+                                                "method": "post",
+                                                "body": {
+                                                    "incidentArmId": "@triggerBody()?['object']?['id']",
+                                                    "message": "[concat('<p class=\"editor-paragraph\">Automated containment (', parameters('PlaybookName'), '): sign-in sessions revoked for @{concat(item()?[''Name''], ''@'', item()?[''UPNSuffix''])}. Disabling the account requires analyst approval.</p>')]"
+                                                },
+                                                "path": "/Incidents/Comment"
+                                            }
+                                        }
+                                    },
+                                    "type": "Foreach"
+                                }
+                            },
+                            "runAfter": {
+                                "Entities_-_Get_Accounts": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "else": {
+                                "actions": {
+                                    "Comment_-_analyst_review": {
+                                        "type": "ApiConnection",
+                                        "inputs": {
+                                            "host": {
+                                                "connection": {
+                                                    "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                                                }
+                                            },
+                                            "method": "post",
+                                            "body": {
+                                                "incidentArmId": "@triggerBody()?['object']?['id']",
+                                                "message": "[concat('<p class=\"editor-paragraph\">', parameters('PlaybookName'), ': Medium severity (new IP in a familiar country). No automatic containment. Analyst to confirm with the user; revoke sessions if the activity is not explained.</p>')]"
+                                            },
+                                            "path": "/Incidents/Comment"
+                                        }
+                                    }
+                                }
+                            },
+                            "expression": {
+                                "and": [
+                                    {
+                                        "equals": [
+                                            "@triggerBody()?['object']?['properties']?['severity']",
+                                            "High"
+                                        ]
+                                    }
+                                ]
+                            },
+                            "type": "If"
+                        }
+                    },
+                    "outputs": {}
+                },
+                "parameters": {
+                    "$connections": {
+                        "type": "Object",
+                        "value": {
+                            "azuresentinel": {
+                                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuresentinel')]",
+                                "connectionId": "[resourceId('Microsoft.Web/connections', variables('SentinelConnectionName'))]",
+                                "connectionName": "[variables('SentinelConnectionName')]",
+                                "connectionProperties": {
+                                    "authentication": {
+                                        "type": "ManagedServiceIdentity"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.Web/connections', variables('SentinelConnectionName'))]"
+            ]
+        },
+        {
+            "type": "Microsoft.Authorization/roleAssignments",
+            "apiVersion": "2022-04-01",
+            "name": "[guid(resourceGroup().id, parameters('PlaybookName'), 'sentinel-responder')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Logic/workflows', parameters('PlaybookName'))]"
+            ],
+            "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '3e150937-b8fe-4cfb-8069-0eaf05ecd056')]",
+                "principalId": "[reference(resourceId('Microsoft.Logic/workflows', parameters('PlaybookName')), '2019-05-01', 'full').identity.principalId]",
+                "principalType": "ServicePrincipal"
+            }
+        }
+    ],
+    "outputs": {
+        "PlaybookPrincipalId": {
+            "type": "String",
+            "value": "[reference(resourceId('Microsoft.Logic/workflows', parameters('PlaybookName')), '2019-05-01', 'full').identity.principalId]"
+        }
+    }
+}

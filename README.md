@@ -1,6 +1,6 @@
 # Sentinel detections
 
-KQL detections and data-source health checks I built and tested in a live Microsoft 365 and Microsoft Sentinel environment (Secure Scale Systems, internal projects, October 2026).
+KQL detections and data-source health checks I designed, deployed and tested in a live Microsoft 365 and Microsoft Sentinel environment (Secure Scale Systems, internal projects, October to November 2026).
 
 Two questions drive this repo: does a detection catch what it should without burying the analyst in noise, and is the data it depends on actually arriving?
 
@@ -12,13 +12,18 @@ Two questions drive this repo: does a detection catch what it should without bur
 | `detections/DET-LEAVER-01-leaver-signin-v2.kql` | One alert per person who has left but whose account still signs in after their leave date |
 | `detections/DET-LEAVER-01-leaver-signin-v1.kql` | The first version, kept to show what changed |
 | `detections/DET-LEAVER-02-leaver-account-reenabled.kql` | Alerts when a leaver's account is switched back on, and shows who did it |
+| `detections/DET-PHI-01-phi-bulk-download/` | Alerts when one user downloads 50+ patient-data files from an IP they have never signed in from, and revokes their sessions on High. Includes the rule export, the response playbook and a synthetic test harness |
 | `investigation/INV-01-account-change-history.kql` | Every change made to one account, and who or what made it |
 | `investigation/INV-02-account-signin-history.kql` | Every sign-in attempt for one account, with result code, IP, browser and OS |
 | `investigation/INV-03-leaver-signins-since-leave-date.kql` | Hunting: every sign-in (interactive and non-interactive) by each leaver since their own leave date, with days to first return |
 | `assurance/A01-data-source-health-overview.kql` | Every table: last data, 30-day volume, active days, Healthy / Delayed / Silent |
 | `assurance/A03-expected-tables-missing.kql` | The tables my rules depend on, flagging any with no data in 30 days |
 | `assurance/DA-02-critical-log-source-silent.kql` | Hourly rule that raises an incident when a normally active source goes quiet |
+| `assurance/DA-03-officeactivity-late-arrival.kql` | Hourly rule that raises an incident when OfficeActivity records arrive more than a day late (DET-PHI-01 ignores them) |
 | `watchlists/Leavers-sample.csv` | Sample leavers list (fake accounts) |
+| `watchlists/PHI-Sensitive-Sites-sample.csv` | Sample list of SharePoint and OneDrive sites that hold patient data (contoso URLs) |
+| `docs/DET-PHI-01/` | DET-PHI-01 write-up (PDF) and the redacted screenshots from the live tests |
+| `tools/validate.js` | Offline syntax and schema check for the KQL, using Microsoft's Kusto.Language parser |
 
 
 ## MITRE ATT&CK Mapping
@@ -28,9 +33,11 @@ Two questions drive this repo: does a detection catch what it should without bur
 | **DET-01** | [Potential Brute Force Attack](detections/01-brute-force-detection.md) | Credential Access (TA0006) | Brute Force (T1110) | Password Guessing (T1110.001) | SigninLogs | Validated |
 | **DET-02** | [Leaver Account Sign-In](detections/DET-LEAVER-01-leaver-signin-v2.kql) | Initial Access (TA0001), Persistence (TA0003) | Valid Accounts (T1078) | Cloud Accounts (T1078.004) | SigninLogs, Watchlist | Validated |
 | **DET-03** | [Leaver Account Re-enabled](detections/DET-LEAVER-02-leaver-account-reenabled.kql) | Persistence (TA0003) | Account Manipulation (T1098) | - | AuditLogs, Watchlist | Validated |
+| **DET-04** | [PHI Bulk Download from Unfamiliar Network](detections/DET-PHI-01-phi-bulk-download/) | Collection (TA0009), Initial Access (TA0001) | Data from Cloud Storage (T1530), Data from Information Repositories (T1213), Valid Accounts (T1078) | SharePoint (T1213.002), Cloud Accounts (T1078.004) | OfficeActivity, SigninLogs, AADNonInteractiveUserSignInLogs, Watchlist | Validated |
 | **INV-03** | [Leaver Sign-ins Since Leave Date](investigation/INV-03-leaver-signins-since-leave-date.kql) | Initial Access (TA0001), Persistence (TA0003) | Valid Accounts (T1078) | Cloud Accounts (T1078.004) | SigninLogs, AADNonInteractiveUserSignInLogs, Watchlist | Validated |
 | **ASSUR-01** | [Data Source Health Overview](assurance/A01-data-source-health-overview.kql) | Defense Evasion (TA0005) | Indicator Removal (T1070) | - | Usage | Validated |
 | **ASSUR-02** | [Critical Log Source Silent](assurance/DA-02-critical-log-source-silent.kql) | Defense Evasion (TA0005) | Indicator Removal (T1070) | Disable or Modify Cloud Logs (T1562.008) | Multiple tables | Validated |
+| **ASSUR-03** | [OfficeActivity Late Arrival](assurance/DA-03-officeactivity-late-arrival.kql) | - | - | - | OfficeActivity | Validated |
 
 ### Legend
 - **DET** = Detection Rule
@@ -84,6 +91,23 @@ The scheduled rules look back 7 days, so a leaver who got back in three weeks ag
 
 In testing, the test leaver showed 38 sign-ins from both tables, back the same day they left. `FirstSeenAfterLeave` is the earliest sign-in still in retention, so if it sits at the retention edge, the true first return may be earlier.
 
+## PHI bulk download (DET-PHI-01)
+
+**The problem.** An attacker with a stolen session token can sign in past MFA and pull patient records in bulk before anyone notices. Healthcare ransomware groups steal data before encrypting it, so the download is the last point to stop the breach.
+
+**What it does.** Counts distinct files a user downloads from patient-data locations in SharePoint and OneDrive (a watchlist of sites, with a regex on folder names as a fallback), keeps only downloads from IPs that user has never signed in from in the previous 14 days, and alerts at 50 files. High when the account has no sign-in history or the download comes from a new country; Medium otherwise. On High, a Logic App playbook revokes the user's sign-in sessions and comments on the incident.
+
+**Tested.** A synthetic harness of nine users runs the rule unchanged in any workspace. Live tests in the lab on 20 to 24 November 2026 used a test account downloading 60 synthetic files through a VPN:
+
+| Run | Result |
+|---|---|
+| 24 Nov, morning | Download to containment in 55 minutes, no manual step. Entra ID audit log shows the revocation by the playbook |
+| 24 Nov, evening | Watchlist-only match; the alert joined an open incident and a second automation rule ran the playbook. Download to containment in about 27 minutes; the session was dead at the first check, 6.5 minutes after the revoke |
+
+Things the live tests changed: an audit record arrived 674 minutes late, so the rule now reads records by arrival time and DA-03 watches for anything later than a day; the VPN client showed an IPv4 address while SharePoint logged IPv6; and the first playbook run failed with a 400 because Logic Apps reads `@@` as an escaped `@`.
+
+Full write-up, setup order, limitations and evidence: [`detections/DET-PHI-01-phi-bulk-download/`](detections/DET-PHI-01-phi-bulk-download/) and [`docs/DET-PHI-01/`](docs/DET-PHI-01/).
+
 ## Data source health (Detection Assurance)
 
 A detection can be enabled and look healthy while its data source has stopped sending. Nothing errors.
@@ -92,11 +116,15 @@ A detection can be enabled and look healthy while its data source has stopped se
 - **A03** covers the gap A01 can't see: a source that never connected has no Usage rows at all.
 - In my environment, A03 showed **3 of 6** sources my rules depended on had sent nothing for 30 days (OfficeActivity, DeviceProcessEvents, DeviceLogonEvents), so **4 of 10** rules could not fire.
 - **DA-02** now checks every hour, with a separate allowed-silence window per table. AuditLogs being quiet for two days is normal in a small tenant; SigninLogs being quiet for two days is not.
+- **DA-03** checks every hour for OfficeActivity records that arrive more than a day after the event, which DET-PHI-01 would never evaluate.
 
 ## Using these
 
 - Create a watchlist with alias `Leavers`, SearchKey `UserPrincipalName`, from your HR leavers data.
+- For DET-PHI-01, create a watchlist with alias `PHI-Sensitive-Sites`, SearchKey `SiteUrl`, and follow the setup order in its README.
 - Adjust the `Thresholds` table in DA-02 to how often each of your tables normally receives data.
 - Run any query in Logs over a few days before turning it into a rule.
 
 No tenant IDs, real user data or secrets are included.
+
+Where an AI assistant drafted code or documentation, that detection's README says which parts and how I tested them.

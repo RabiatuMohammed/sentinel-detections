@@ -1,0 +1,72 @@
+// Secure Scale Systems | PHI bulk download from an unfamiliar network
+// Sentinel scheduled rule: run every 1h | query period 14d | alert when results > 0
+// Dynamic severity: Severity column | Entities: Account = UserId, IP = IPAddress
+// MITRE ATT&CK: T1530 Data from Cloud Storage, T1213.002 SharePoint (Collection)
+// NIST CSF 2.0: DE.CM-03, DE.AE-02, DE.AE-03 | HIPAA: 164.312(b), 164.308(a)(1)(ii)(D)
+let DetectionWindow = 1h;      // records that ARRIVED in the last hour; matches rule frequency, so each record is evaluated once
+let MaxArrivalDelay = 1d;      // OfficeActivity records can arrive hours late (11h observed); events older than this are ignored
+let BaselinePeriod  = 14d;     // must not exceed the rule query period
+let BaselineGap     = 1d;      // baseline ends 1 day back (>= MaxArrivalDelay), so an attacker's recent sign-ins never count as familiar
+let FileThreshold   = 50;      // distinct PHI files from unfamiliar IPs per user per window
+let ExcludedAccounts = dynamic([]);   // approved bulk-download service accounts (backup, migration, eDiscovery)
+// Primary scope: SharePoint/OneDrive sites known to hold PHI (Sentinel watchlist, SearchKey = site URL)
+let SensitiveSites = toscalar(
+    _GetWatchlist('PHI-Sensitive-Sites')
+    | summarize make_set(tolower(trim_end(@"/", tostring(SearchKey)))));
+// Fallback scope: PHI naming in site or library paths, matched on word boundaries
+let SensitivePathRegex = @"(?i)(^|[^a-z])(patients?|phi|ehr|emr|clinical|medical[ _-]?records?)([^a-z]|$)";
+// 1. PHI downloads that arrived in the detection window (ingestion time, so late records are never skipped)
+let PHIDownloads = OfficeActivity
+    | where TimeGenerated > ago(MaxArrivalDelay)
+    | where coalesce(ingestion_time(), TimeGenerated) > ago(DetectionWindow)   // coalesce: test fixtures have no ingestion time
+    | where OfficeWorkload in ("SharePoint", "OneDrive")
+    | where Operation in ("FileDownloaded", "FileSyncDownloadedFull")
+    | where UserId has "@" and not(UserId in~ (ExcludedAccounts))
+    | where tolower(trim_end(@"/", Site_Url)) in (SensitiveSites)
+        or strcat(Site_Url, SourceRelativeUrl) matches regex SensitivePathRegex
+    | extend UserKey = tolower(UserId);
+// 2. Users over the threshold on raw volume (cheap pre-filter before the baseline lookup)
+let CandidateUsers = toscalar(
+    PHIDownloads
+    | summarize Files = dcount(OfficeObjectId) by UserKey
+    | where Files >= FileThreshold
+    | summarize make_set(UserKey));
+// 3. Familiar networks: successful interactive and non-interactive sign-ins, ending BaselineGap before now
+let Baseline = union SigninLogs, AADNonInteractiveUserSignInLogs
+    | where TimeGenerated between (ago(BaselinePeriod) .. ago(BaselineGap))
+    | where ResultType == "0"
+    | extend UserKey = tolower(UserPrincipalName)
+    | where UserKey in (CandidateUsers)
+    | summarize by UserKey, IPAddress
+    | extend Country = tostring(geo_info_from_ip_address(IPAddress).country)
+    | summarize KnownIPs = make_set(IPAddress, 10000), KnownCountries = make_set(Country, 200) by UserKey;
+// 4. Keep only downloads from IPs the user has never signed in from, then re-apply the threshold
+PHIDownloads
+| where UserKey in (CandidateUsers)
+| join kind=leftouter Baseline on UserKey
+| extend DownloadCountry = tostring(geo_info_from_ip_address(ClientIP).country)
+| extend IPKnown      = iff(array_length(KnownIPs) > 0, set_has_element(KnownIPs, ClientIP), false)
+| extend CountryKnown = iff(array_length(KnownCountries) > 0, set_has_element(KnownCountries, DownloadCountry), false)
+| where not(IPKnown)
+| summarize
+    StartTime        = min(TimeGenerated),
+    EndTime          = max(TimeGenerated),
+    UnfamiliarFiles  = dcount(OfficeObjectId),
+    DownloadEvents   = count(),
+    NewCountryEvents = countif(not(CountryKnown)),
+    UnfamiliarIPs    = make_set(ClientIP, 20),
+    Countries        = make_set(DownloadCountry, 20),
+    Sites            = make_set(Site_Url, 20),
+    SampleFiles      = make_set(SourceFileName, 25),
+    UserAgents       = make_set(UserAgent, 10),
+    BaselineIPCount  = take_any(array_length(KnownIPs)),
+    UserId           = take_any(UserId)
+    by UserKey
+| where UnfamiliarFiles >= FileThreshold
+| extend BaselineIPCount = coalesce(BaselineIPCount, 0)
+// High: no sign-in history at all, or downloads from a country never seen for this user
+| extend Severity  = iff(BaselineIPCount == 0 or NewCountryEvents > 0, "High", "Medium")
+| extend IPAddress = tostring(UnfamiliarIPs[0])
+| project StartTime, EndTime, UserId, Severity, UnfamiliarFiles, DownloadEvents, IPAddress,
+          UnfamiliarIPs, Countries, NewCountryEvents, BaselineIPCount, Sites, SampleFiles, UserAgents
+| order by UnfamiliarFiles desc

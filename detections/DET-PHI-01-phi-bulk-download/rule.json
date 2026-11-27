@@ -1,0 +1,100 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "workspace": {
+            "type": "String"
+        }
+    },
+    "resources": [
+        {
+            "id": "[concat(resourceId('Microsoft.OperationalInsights/workspaces/providers', parameters('workspace'), 'Microsoft.SecurityInsights'),'/alertRules/5f037f34-995e-4dc9-aff2-6dec61c8df83')]",
+            "name": "[concat(parameters('workspace'),'/Microsoft.SecurityInsights/5f037f34-995e-4dc9-aff2-6dec61c8df83')]",
+            "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+            "kind": "Scheduled",
+            "apiVersion": "2023-12-01-preview",
+            "properties": {
+                "displayName": "PHI bulk download from unfamiliar network",
+                "description": "#INC_CORR#\nAlerts when a user downloads 50+ distinct files from PHI SharePoint/OneDrive locations from IPs absent from their 14-day sign-in history. High: no history or new country. Medium: new IP in a known country.",
+                "severity": "Medium",
+                "enabled": true,
+                "query": "// Secure Scale Systems | PHI bulk download from an unfamiliar network\r\n// Sentinel scheduled rule: run every 1h | query period 14d | alert when results > 0\r\n// Dynamic severity: Severity column | Entities: Account = UserId, IP = IPAddress\r\n// MITRE ATT&CK: T1530 Data from Cloud Storage, T1213.002 SharePoint (Collection)\r\n// NIST CSF 2.0: DE.CM-03, DE.AE-02, DE.AE-03 | HIPAA: 164.312(b), 164.308(a)(1)(ii)(D)\r\nlet DetectionWindow = 1h;      // records that ARRIVED in the last hour; matches rule frequency, so each record is evaluated once\r\nlet MaxArrivalDelay = 1d;      // OfficeActivity records can arrive hours late (11h observed); events older than this are ignored\r\nlet BaselinePeriod  = 14d;     // must not exceed the rule query period\r\nlet BaselineGap     = 1d;      // baseline ends 1 day back (>= MaxArrivalDelay), so an attacker's recent sign-ins never count as familiar\r\nlet FileThreshold   = 50;      // distinct PHI files from unfamiliar IPs per user per window\r\nlet ExcludedAccounts = dynamic([]);   // approved bulk-download service accounts (backup, migration, eDiscovery)\r\n// Primary scope: SharePoint/OneDrive sites known to hold PHI (Sentinel watchlist, SearchKey = site URL)\r\nlet SensitiveSites = toscalar(\r\n    _GetWatchlist('PHI-Sensitive-Sites')\r\n    | summarize make_set(tolower(trim_end(@\"/\", tostring(SearchKey)))));\r\n// Fallback scope: PHI naming in site or library paths, matched on word boundaries\r\nlet SensitivePathRegex = @\"(?i)(^|[^a-z])(patients?|phi|ehr|emr|clinical|medical[ _-]?records?)([^a-z]|$)\";\r\n// 1. PHI downloads that arrived in the detection window (ingestion time, so late records are never skipped)\r\nlet PHIDownloads = OfficeActivity\r\n    | where TimeGenerated > ago(MaxArrivalDelay)\r\n    | where coalesce(ingestion_time(), TimeGenerated) > ago(DetectionWindow)   // coalesce: test fixtures have no ingestion time\r\n    | where OfficeWorkload in (\"SharePoint\", \"OneDrive\")\r\n    | where Operation in (\"FileDownloaded\", \"FileSyncDownloadedFull\")\r\n    | where UserId has \"@\" and not(UserId in~ (ExcludedAccounts))\r\n    | where tolower(trim_end(@\"/\", Site_Url)) in (SensitiveSites)\r\n        or strcat(Site_Url, SourceRelativeUrl) matches regex SensitivePathRegex\r\n    | extend UserKey = tolower(UserId);\r\n// 2. Users over the threshold on raw volume (cheap pre-filter before the baseline lookup)\r\nlet CandidateUsers = toscalar(\r\n    PHIDownloads\r\n    | summarize Files = dcount(OfficeObjectId) by UserKey\r\n    | where Files >= FileThreshold\r\n    | summarize make_set(UserKey));\r\n// 3. Familiar networks: successful interactive and non-interactive sign-ins, ending BaselineGap before now\r\nlet Baseline = union SigninLogs, AADNonInteractiveUserSignInLogs\r\n    | where TimeGenerated between (ago(BaselinePeriod) .. ago(BaselineGap))\r\n    | where ResultType == \"0\"\r\n    | extend UserKey = tolower(UserPrincipalName)\r\n    | where UserKey in (CandidateUsers)\r\n    | summarize by UserKey, IPAddress\r\n    | extend Country = tostring(geo_info_from_ip_address(IPAddress).country)\r\n    | summarize KnownIPs = make_set(IPAddress, 10000), KnownCountries = make_set(Country, 200) by UserKey;\r\n// 4. Keep only downloads from IPs the user has never signed in from, then re-apply the threshold\r\nPHIDownloads\r\n| where UserKey in (CandidateUsers)\r\n| join kind=leftouter Baseline on UserKey\r\n| extend DownloadCountry = tostring(geo_info_from_ip_address(ClientIP).country)\r\n| extend IPKnown      = iff(array_length(KnownIPs) > 0, set_has_element(KnownIPs, ClientIP), false)\r\n| extend CountryKnown = iff(array_length(KnownCountries) > 0, set_has_element(KnownCountries, DownloadCountry), false)\r\n| where not(IPKnown)\r\n| summarize\r\n    StartTime        = min(TimeGenerated),\r\n    EndTime          = max(TimeGenerated),\r\n    UnfamiliarFiles  = dcount(OfficeObjectId),\r\n    DownloadEvents   = count(),\r\n    NewCountryEvents = countif(not(CountryKnown)),\r\n    UnfamiliarIPs    = make_set(ClientIP, 20),\r\n    Countries        = make_set(DownloadCountry, 20),\r\n    Sites            = make_set(Site_Url, 20),\r\n    SampleFiles      = make_set(SourceFileName, 25),\r\n    UserAgents       = make_set(UserAgent, 10),\r\n    BaselineIPCount  = take_any(array_length(KnownIPs)),\r\n    UserId           = take_any(UserId)\r\n    by UserKey\r\n| where UnfamiliarFiles >= FileThreshold\r\n| extend BaselineIPCount = coalesce(BaselineIPCount, 0)\r\n// High: no sign-in history at all, or downloads from a country never seen for this user\r\n| extend Severity  = iff(BaselineIPCount == 0 or NewCountryEvents > 0, \"High\", \"Medium\")\r\n| extend IPAddress = tostring(UnfamiliarIPs[0])\r\n| project StartTime, EndTime, UserId, Severity, UnfamiliarFiles, DownloadEvents, IPAddress,\r\n          UnfamiliarIPs, Countries, NewCountryEvents, BaselineIPCount, Sites, SampleFiles, UserAgents\r\n| order by UnfamiliarFiles desc",
+                "queryFrequency": "PT1H",
+                "queryPeriod": "P14D",
+                "triggerOperator": "GreaterThan",
+                "triggerThreshold": 0,
+                "suppressionDuration": "PT5H",
+                "suppressionEnabled": false,
+                "startTimeUtc": null,
+                "tactics": [
+                    "Collection",
+                    "InitialAccess"
+                ],
+                "techniques": [
+                    "T1213",
+                    "T1078",
+                    "T1530"
+                ],
+                "subTechniques": [
+                    "T1213.002",
+                    "T1078.004"
+                ],
+                "alertRuleTemplateName": null,
+                "incidentConfiguration": {
+                    "createIncident": true,
+                    "groupingConfiguration": {
+                        "enabled": true,
+                        "reopenClosedIncident": false,
+                        "lookbackDuration": "P1D",
+                        "matchingMethod": "Selected",
+                        "groupByEntities": [
+                            "Account"
+                        ],
+                        "groupByAlertDetails": [],
+                        "groupByCustomDetails": []
+                    }
+                },
+                "eventGroupingSettings": {
+                    "aggregationKind": "AlertPerResult"
+                },
+                "alertDetailsOverride": {
+                    "alertDisplayNameFormat": "PHI bulk download by {{UserId}} from unfamiliar network",
+                    "alertDescriptionFormat": "{{UserId}} downloaded {{UnfamiliarFiles}} PHI files from unfamiliar IP {{IPAddress}}",
+                    "alertSeverityColumnName": "Severity",
+                    "alertDynamicProperties": []
+                },
+                "customDetails": {
+                    "UnfamiliarFiles": "UnfamiliarFiles",
+                    "Countries": "Countries",
+                    "Sites": "Sites",
+                    "SampleFiles": "SampleFiles",
+                    "BaselineIPCount": "BaselineIPCount",
+                    "StartTime": "StartTime",
+                    "EndTime": "EndTime"
+                },
+                "entityMappings": [
+                    {
+                        "entityType": "Account",
+                        "fieldMappings": [
+                            {
+                                "identifier": "FullName",
+                                "columnName": "UserId"
+                            }
+                        ]
+                    },
+                    {
+                        "entityType": "IP",
+                        "fieldMappings": [
+                            {
+                                "identifier": "Address",
+                                "columnName": "IPAddress"
+                            }
+                        ]
+                    }
+                ],
+                "sentinelEntitiesMappings": null,
+                "templateVersion": null
+            }
+        }
+    ]
+}

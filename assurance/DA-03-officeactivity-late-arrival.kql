@@ -1,0 +1,12 @@
+// DA-03 - OfficeActivity records arriving more than 1 day late
+// Sentinel scheduled rule: run every 1h | query period 14d | alert when results > 0 | severity Low
+// Companion to DET-PHI-01 (detections/DET-PHI-01-phi-bulk-download): that rule ignores records that arrive later than MaxArrivalDelay (1d).
+// If this fires, raise MaxArrivalDelay and BaselineGap together in DET-PHI-01.
+// Tested 24 Nov 2026: a manual run of the query returned zero late records.
+OfficeActivity
+| where TimeGenerated > ago(14d)
+| where ingestion_time() > ago(1h)
+| extend Lag = ingestion_time() - TimeGenerated
+| where Lag > 1d
+| summarize LateRecords = count(), WorstLag = max(Lag)
+| where LateRecords > 0

@@ -1,0 +1,86 @@
+// ===== TEST FIXTURES: shadow the real tables with synthetic data (no underscore names: Log Analytics reserves them) =====
+// Fixture downloads land at ~now-30m (no ingestion time, so the rule falls back to TimeGenerated). Baseline ends 1 day back.
+// Expected results (rewritten rule): Alice High, Carol High, Grace High, Hank High, Ivy Medium. Nobody else.
+// Expected results (original query): Frank (false positive) and Ivy. Alice, Carol, Grace, Hank missed.
+// Stands in for the PHI-Sensitive-Sites watchlist (build.sh swaps the detection's _GetWatchlist call for this)
+let TestWatchlist = datatable(SearchKey:string)["https://contoso.sharepoint.com/sites/Oncology/"];
+let MakeDownloads = (user:string, ip:string, site:string, path:string, n:long, distinctFiles:long, op:string, prefix:string) {
+    range i from 1 to n step 1
+    | extend File = strcat(prefix, "-", tostring(i % distinctFiles), ".pdf")
+    | project
+        TimeGenerated     = now() - 30m + i * 1s,
+        Operation         = op,
+        OfficeWorkload    = "SharePoint",
+        UserId            = user,
+        ClientIP          = ip,
+        Site_Url           = site,
+        SourceRelativeUrl = path,
+        SourceFileName    = File,
+        OfficeObjectId    = strcat(site, path, "/", File),
+        UserAgent         = "Mozilla/5.0"
+};
+let Onc = "https://contoso.sharepoint.com/sites/Oncology/";
+let OfficeActivity = union
+    // Alice: attacker IP (AU) also signed in inside the window. Original query treats it as familiar.
+    MakeDownloads("alice@contoso.org", "1.128.0.1",    Onc, "Shared Documents/Scans", 60, 60, "FileDownloaded", "patient"),
+    // Bob: bulk download from his own known IP. Legitimate, no alert.
+    MakeDownloads("bob@contoso.org",   "81.2.69.150",  Onc, "Shared Documents/Scans", 80, 80, "FileDownloaded", "patient"),
+    // Carol: no sign-in history at all (token theft / dormant account). Original inner join drops her.
+    MakeDownloads("carol@contoso.org", "1.128.0.2",    Onc, "Shared Documents/Scans", 70, 70, "FileDownloaded", "patient"),
+    // Dave: unfamiliar IP but below threshold.
+    MakeDownloads("dave@contoso.org",  "1.128.0.5",    Onc, "Shared Documents/Scans", 30, 30, "FileDownloaded", "patient"),
+    // Erin: unfamiliar IP, non-PHI site.
+    MakeDownloads("erin@contoso.org",  "1.128.0.6",    "https://contoso.sharepoint.com/sites/Marketing/", "Shared Documents/Campaigns", 60, 60, "FileDownloaded", "campaign"),
+    // Frank: OneDrive sync re-downloading the same 5 files 60 times from a new IP in his home country.
+    MakeDownloads("frank@contoso.org", "81.2.69.170",  Onc, "Shared Documents/Scans", 60, 5, "FileSyncDownloadedFull", "patient"),
+    // Grace: UserId casing differs from her UPN. Original case-sensitive join drops her.
+    MakeDownloads("Grace@Contoso.org", "1.128.0.3",    Onc, "Shared Documents/Scans", 55, 55, "FileDownloaded", "patient"),
+    // Hank: site not on the watchlist, named "Patients-Records". Original has_any("patient") misses the plural.
+    MakeDownloads("hank@contoso.org",  "1.128.0.4",    "https://contoso.sharepoint.com/sites/Patients-Records/", "Shared Documents/2026", 60, 60, "FileDownloaded", "scan"),
+    // Ivy: new IP in her usual country. Rewritten rule alerts at Medium.
+    MakeDownloads("ivy@contoso.org",   "81.2.69.200",  Onc, "Shared Documents/Scans", 60, 60, "FileDownloaded", "patient");
+let SigninLogs = datatable(TimeGenerated:datetime, UserPrincipalName:string, IPAddress:string, ResultType:string, Location:string)[]
+    | union (datatable(Ago:timespan, UserPrincipalName:string, IPAddress:string)[
+        3d,   "alice@contoso.org", "81.2.69.142",
+        70m,  "alice@contoso.org", "1.128.0.1",    // attacker sign-in 70 minutes ago: inside the 1-day baseline gap, so excluded
+        2d,   "bob@contoso.org",   "81.2.69.150",
+        2d,   "dave@contoso.org",  "81.2.69.151",
+        2d,   "erin@contoso.org",  "81.2.69.152",
+        2d,   "frank@contoso.org", "81.2.69.160",
+        2d,   "grace@contoso.org", "81.2.69.143",
+        2d,   "hank@contoso.org",  "81.2.69.145",
+        2d,   "ivy@contoso.org",   "81.2.69.144"]
+      | project TimeGenerated = now() - Ago, UserPrincipalName, IPAddress, ResultType = "0", Location = "");
+let AADNonInteractiveUserSignInLogs = datatable(TimeGenerated:datetime, UserPrincipalName:string, IPAddress:string, ResultType:string, Location:string)[];
+// ===== DETECTION UNDER TEST =====
+// NOTE: two fixes so this runs at all; logic otherwise unchanged from the first version.
+// 1. SiteUrl -> Site_Url (column does not exist)
+// 2. "!in (FamiliarIPs)" -> set_has_element (in/!in cannot take a per-row list; the first version errors here)
+// SecureScale Systems: Healthcare PHI Exfiltration Detection Framework
+// Author: Rabiatu Mohammed, Lead Detection Engineer
+// Alignment: NIST CSF 2.0 (Detect), HIPAA Security Rule
+// Define thresholds and sensitive repository keywords
+let VolumeThreshold = 50;
+let SensitiveFolders = dynamic(["patient", "medical_records", "phi", "ehr"]);
+// Query Microsoft 365 OfficeActivity logs for download events
+OfficeActivity
+| where TimeGenerated > ago(24h)
+| where Operation in ("FileDownloaded", "FileSyncDownloadedFull")
+// Filter for sensitive healthcare repositories
+| where SourceFileName has_any (SensitiveFolders) or Site_Url has_any (SensitiveFolders)
+// Identify anomalous behavior: High volume from specific users
+| summarize
+    DownloadCount = count(),
+    SourceIPs = make_set(ClientIP)
+    by UserId, bin(TimeGenerated, 1h)
+| where DownloadCount > VolumeThreshold
+// Cross-reference with Entra ID (Azure AD) sign-in logs to identify unfamiliar locations
+| join kind=inner (
+    SigninLogs
+    | where TimeGenerated > ago(7d) // Establish a 7-day baseline of familiar IPs
+    | summarize FamiliarIPs = make_set(IPAddress) by UserPrincipalName
+) on $left.UserId == $right.UserPrincipalName
+| mv-expand SourceIPs
+| where not(set_has_element(FamiliarIPs, tostring(SourceIPs))) // was: SourceIPs !in (FamiliarIPs)
+| project TimeGenerated, UserId, DownloadCount, SourceIPs, SensitiveFolders
+| order by DownloadCount desc

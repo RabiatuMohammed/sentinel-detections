@@ -1,0 +1,36 @@
+// NOTE: two fixes so this runs at all; logic otherwise unchanged from the first version.
+// 1. SiteUrl -> Site_Url (column does not exist)
+// 2. "!in (FamiliarIPs)" -> set_has_element (in/!in cannot take a per-row list; the first version errors here)
+// SecureScale Systems: Healthcare PHI Exfiltration Detection Framework
+// Author: Rabiatu Mohammed, Lead Detection Engineer
+// Alignment: NIST CSF 2.0 (Detect), HIPAA Security Rule
+
+// Define thresholds and sensitive repository keywords
+let VolumeThreshold = 50;
+let SensitiveFolders = dynamic(["patient", "medical_records", "phi", "ehr"]);
+
+// Query Microsoft 365 OfficeActivity logs for download events
+OfficeActivity
+| where TimeGenerated > ago(24h)
+| where Operation in ("FileDownloaded", "FileSyncDownloadedFull")
+// Filter for sensitive healthcare repositories
+| where SourceFileName has_any (SensitiveFolders) or Site_Url has_any (SensitiveFolders)
+
+// Identify anomalous behavior: High volume from specific users
+| summarize
+    DownloadCount = count(),
+    SourceIPs = make_set(ClientIP)
+    by UserId, bin(TimeGenerated, 1h)
+| where DownloadCount > VolumeThreshold
+
+// Cross-reference with Entra ID (Azure AD) sign-in logs to identify unfamiliar locations
+| join kind=inner (
+    SigninLogs
+    | where TimeGenerated > ago(7d) // Establish a 7-day baseline of familiar IPs
+    | summarize FamiliarIPs = make_set(IPAddress) by UserPrincipalName
+) on $left.UserId == $right.UserPrincipalName
+| mv-expand SourceIPs
+| where not(set_has_element(FamiliarIPs, tostring(SourceIPs))) // was: SourceIPs !in (FamiliarIPs)
+
+| project TimeGenerated, UserId, DownloadCount, SourceIPs, SensitiveFolders
+| order by DownloadCount desc
